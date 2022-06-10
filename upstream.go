@@ -180,7 +180,7 @@ var ClientUpstream = &http.Client{
 }
 
 // 调用oneauth接口
-func GetDataByOneauthApi(method, urlStr, reqBody string) ([]byte, error) {
+func GetDataByOneauthApi(client *http.Client, method, urlStr, reqBody string) ([]byte, error) {
 	data := strings.NewReader(reqBody)
 	req, err := http.NewRequest(method, urlStr, data)
 	if err != nil {
@@ -192,7 +192,7 @@ func GetDataByOneauthApi(method, urlStr, reqBody string) ([]byte, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", GlobalConfig.Oneauth.Token)
 
-	resp, err := ClientUpstream.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Info("[http] oneauth recv [", urlStr, "] http response error: ", err)
 		return nil, err
@@ -230,7 +230,7 @@ func GetAllOrgFromUpstream() (RootRspInfo, error) {
 
 	// 从oneauth同步根节点组织信息
 	rootUrl := GlobalConfig.Oneauth.BaseUrl + GetAllRoots
-	rootBody, err := GetDataByOneauthApi("GET", rootUrl, "")
+	rootBody, err := GetDataByOneauthApi(ClientUpstream, "GET", rootUrl, "")
 	if err != nil {
 		log.Error("[http] oneauth get all roots error: ", err)
 		return rootData, err
@@ -259,7 +259,7 @@ func ProcessUpstreamOrgResponse(body []byte) (OrgRspInfo, error) {
 func GetAllDepartmentByOrgId(orgId string) (OrgRspInfo, error) {
 	var orgData OrgRspInfo
 	orgUrl := fmt.Sprintf(GlobalConfig.Oneauth.BaseUrl+GetAllOrgs, orgId)
-	orgBody, err := GetDataByOneauthApi("GET", orgUrl, "")
+	orgBody, err := GetDataByOneauthApi(ClientUpstream, "GET", orgUrl, "")
 	if err != nil {
 		log.Error("[http] oneauth get all org error: ", err)
 		return orgData, err
@@ -283,7 +283,7 @@ func GetAllUsersByOrgId() error {
 		params.Add("limit", "100")
 		userUrl += params.Encode()
 
-		userBody, err := GetDataByOneauthApi("GET", userUrl, "")
+		userBody, err := GetDataByOneauthApi(ClientUpstream, "GET", userUrl, "")
 		if err != nil {
 			log.Error("[http] oneauth get all users error: ", err)
 			return err
@@ -349,7 +349,7 @@ func CreateRootOrg(node *DataOrgMemNode) (string, error) {
 	params.Add("originId", node.NodeCode)
 	urlStr += params.Encode()
 
-	rootBody, err := GetDataByOneauthApi("POST", urlStr, "")
+	rootBody, err := GetDataByOneauthApi(ClientUpstream, "POST", urlStr, "")
 	if err != nil {
 		log.Error("[http] oneauth create roots [", node.NodeName, "] error: ", err)
 		return "", err
@@ -374,7 +374,7 @@ func CreateNormalOrg(node *DataOrgMemNode) (string, error) {
 	}
 	urlStr += params.Encode()
 
-	rootBody, err := GetDataByOneauthApi("POST", urlStr, "")
+	rootBody, err := GetDataByOneauthApi(ClientUpstream, "POST", urlStr, "")
 	if err != nil {
 		log.Error("[http] oneauth create department error: ", err)
 		return "", err
@@ -396,7 +396,7 @@ func UpdateRootOrg(node *DataOrgMemNode) error {
 	params.Add("name", node.NodeName)
 	urlStr += params.Encode()
 
-	_, err := GetDataByOneauthApi("PUT", urlStr, "")
+	_, err := GetDataByOneauthApi(ClientUpstream, "PUT", urlStr, "")
 	if err != nil {
 		log.Error("[http] oneauth create roots [", node.NodeName, "] error: ", err)
 		return err
@@ -411,7 +411,7 @@ func UpdateNormalOrg(node *DataOrgMemNode) error {
 		urlStr := fmt.Sprintf(GlobalConfig.Oneauth.BaseUrl+UpdateOrgDepartment, node.OrgId, node.DepId)
 		body := fmt.Sprintf("{\"name\": \"%s\"}", node.NodeName)
 
-		_, err := GetDataByOneauthApi("PUT", urlStr, body)
+		_, err := GetDataByOneauthApi(ClientUpstream, "PUT", urlStr, body)
 		if err != nil {
 			log.Error("[http] oneauth update department error: ", err)
 			return err
@@ -423,7 +423,7 @@ func UpdateNormalOrg(node *DataOrgMemNode) error {
 
 	if node.Action&(1<<2) != 0 {
 		urlStr := fmt.Sprintf(GlobalConfig.Oneauth.BaseUrl+MoveOrgDepartment, node.OrgId, node.DepId, node.FatherId)
-		_, err := GetDataByOneauthApi("PUT", urlStr, "")
+		_, err := GetDataByOneauthApi(ClientUpstream, "PUT", urlStr, "")
 		if err != nil {
 			log.Error("[http] oneauth move department error: ", err)
 			return err
@@ -438,7 +438,7 @@ func UpdateNormalOrg(node *DataOrgMemNode) error {
 
 func DelNormalOrg(node *DataOrgMemNode) {
 	urlStr := fmt.Sprintf(GlobalConfig.Oneauth.BaseUrl+DeleteOrgDepartment, node.OrgId, node.DepId)
-	_, err := GetDataByOneauthApi("DELETE", urlStr, "")
+	_, err := GetDataByOneauthApi(ClientUpstream, "DELETE", urlStr, "")
 	if err != nil {
 		log.Error("[http] oneauth delete org [", node.NodeCode, ", ", node.NodeName, "], [", urlStr, "] error: ", err)
 	}
@@ -506,14 +506,14 @@ func SyncDataFromOneAuth() error {
 }
 
 // 更新根节点
-func CreateNewUser(node *DataApiEmpNode) (string, error) {
+func CreateNewUser(client *http.Client, node *DataApiEmpNode) (string, error) {
 	urlStr := GlobalConfig.Oneauth.BaseUrl + CreateUser
-	body := fmt.Sprintf(`{"account":"%s","displayName":"%s","gender":"","idCardNumber":"","address":"","mobilePhone":"","nickName":"","groupId":["1"],"jobTitle":"","firstName":"%s","lastName":"","birthday":"2022-06-06","email":"%s","employeeId":"%s","orgId":"%s","departmentId":["%s"]}`,
+	body := fmt.Sprintf(`{"account":"%s","displayName":"%s","gender":"","idCardNumber":"","address":"","mobilePhone":"","nickName":"","groupId":["1"],"jobTitle":"","isImport":true,"firstName":"%s","lastName":"","birthday":"2022-06-06","email":"%s","employeeId":"%s","orgId":"%s","departmentId":["%s"]}`,
 		node.OAID, node.UserName, node.UserName, node.Email, node.UserCode, node.OrgId, node.DepId)
 
 	log.Trace(body)
 
-	rootBody, err := GetDataByOneauthApi("POST", urlStr, body)
+	rootBody, err := GetDataByOneauthApi(client, "POST", urlStr, body)
 	if err != nil {
 		log.Error("[http] oneauth create users [", node.UserCode, ", ", node.UserName, "] error: ", err)
 		return "", err
@@ -528,14 +528,14 @@ func CreateNewUser(node *DataApiEmpNode) (string, error) {
 	return responseData.UserId, nil
 }
 
-func UpdateUserInfo(node *DataApiEmpNode) error {
+func UpdateUserInfo(client *http.Client, node *DataApiEmpNode) error {
 	urlStr := fmt.Sprintf(GlobalConfig.Oneauth.BaseUrl+UpdateUser, node.Id)
-	body := fmt.Sprintf(`{"propval":{"account":"%s","displayName":"%s","gender":"","idCardNumber":"","address":"","mobilePhone":"","nickName":"","groupId":["1"],"jobTitle":"","firstName":"%s","lastName":"","birthday":"2022-06-06","email":"%s","employeeId":"%s","orgId":"%s","departmentId":["%s"]}}`,
+	body := fmt.Sprintf(`{"propval":{"account":"%s","displayName":"%s","gender":"","idCardNumber":"","address":"","mobilePhone":"","nickName":"","groupId":["1"],"jobTitle":"","isImport":true,"firstName":"%s","lastName":"","birthday":"2022-06-06","email":"%s","employeeId":"%s","orgId":"%s","departmentId":["%s"]}}`,
 		node.OAID, node.UserName, node.UserName, node.Email, node.UserCode, node.OrgId, node.DepId)
 
 	log.Trace(body)
 
-	_, err := GetDataByOneauthApi("PUT", urlStr, body)
+	_, err := GetDataByOneauthApi(client, "PUT", urlStr, body)
 	if err != nil {
 		log.Error("[http] oneauth update user [", node.UserCode, ", ", node.UserName, ", ", node.Id, "] error: ", err)
 		return err
@@ -544,9 +544,9 @@ func UpdateUserInfo(node *DataApiEmpNode) error {
 	return nil
 }
 
-func MoveUserByUserId(node *DataApiEmpNode) error {
+func MoveUserByUserId(client *http.Client, node *DataApiEmpNode) error {
 	urlStr := fmt.Sprintf(GlobalConfig.Oneauth.BaseUrl+MoveUser, node.Id, node.OrgId, node.DepId)
-	_, err := GetDataByOneauthApi("PUT", urlStr, "")
+	_, err := GetDataByOneauthApi(client, "PUT", urlStr, "")
 	if err != nil {
 		log.Error("[http] oneauth move user [", node.UserCode, ", ", node.UserName, ", ", node.Id, "] error: ", err)
 		return err
@@ -555,9 +555,9 @@ func MoveUserByUserId(node *DataApiEmpNode) error {
 	return nil
 }
 
-func DeleteUserByUserId(node *DataApiEmpNode) error {
+func DeleteUserByUserId(client *http.Client, node *DataApiEmpNode) error {
 	urlStr := fmt.Sprintf(GlobalConfig.Oneauth.BaseUrl+DelUser, node.Id)
-	_, err := GetDataByOneauthApi("PUT", urlStr, "")
+	_, err := GetDataByOneauthApi(client, "PUT", urlStr, "")
 	if err != nil {
 		log.Error("[http] oneauth delete user [", node.UserCode, ", ", node.UserName, ", ", node.Id, "] error: ", err)
 		return err

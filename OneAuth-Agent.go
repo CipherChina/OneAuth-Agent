@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
@@ -41,68 +44,6 @@ func GetPersonMd5(newPerson PersonNode) string {
 }
 */
 
-/*
-
-// 删除node信息
-func DelNode(userdn string) {
-
-		ldapDel := ldap.NewDelRequest(userdn, nil)
-		if err := LdapPtr.Del(ldapDel); err != nil {
-			log.Info("Ldap delete person info error: ", err)
-		}
-
-
-}
-
-// 删除node信息
-func DelOUNode(userdn string) {
-
-		controls := []ldap.Control{}
-		controls = append(controls, ldap.NewControlSubtreeDelete())
-
-		ldapDel := ldap.NewDelRequest(userdn, controls)
-		if err := LdapPtr.Del(ldapDel); err != nil {
-			if ldap.IsErrorWithCode(err, 11) {
-				DelOUNode(userdn)
-			} else {
-				log.Info("Ldap delete person info error: ", err)
-			}
-		}
-
-
-}
-
-*/
-
-/*
-func DelOuNode(ouStr string) {
-        DelCurrentMembers(ouStr)
-
-        searchOURequest := ldap.NewSearchRequest(
-                ouStr, // The base dn to search
-                ldap.ScopeSingleLevel, ldap.NeverDerefAliases, 0, 0, false,
-                `(&(OU=*)(objectClass=organizationalUnit))`,
-                []string{"dn"}, // A list attributes to retrieve
-                nil,
-        )
-
-        OuList, err := LdapPtr.Search(searchOURequest)
-        if err != nil {
-                log.Info("ldap search erorr: ", err)
-                return
-        }
-
-        if len(OuList.Entries) > 0 {
-                for _, ouNode := range OuList.Entries {
-                        DelOuNode(ouNode.DN)
-                }
-        }
-
-        DelNode(ouStr)
-}
-
-*/
-
 // 判断目录是否存在
 func PathExists(path string) (bool, error) {
 	_, err := os.Stat(path)
@@ -121,6 +62,7 @@ func InitConfig(fileConf string) bool {
 	GlobalConfig.Oneauth.Upstream.Tls = true
 	GlobalConfig.System.Log.Level = "4"
 	GlobalConfig.System.Log.Path = "log/OneAuth.log"
+	GlobalConfig.System.Fiber = "10"
 
 	// 检查log目录是否存在
 	if ok, _ := PathExists("log"); !ok {
@@ -643,22 +585,33 @@ func CreateUserTaskQueue(userMap *map[string]*DataApiEmpNode) *Queue {
 	return CompareAndCreateUserTask(userMap, &UpstreamUsersData)
 }
 
-func ProcessUsersTaskQueue(taskUsersQueue *Queue) {
-	log.Info("[task] ProcessUsersTaskQueue user task queue size: ", taskUsersQueue.Len())
-
+func ProcessFiberUserTaskQueue(taskUsersQueue *Queue) {
 	for {
 		if taskUsersQueue.Len() <= 0 {
 			break
 		}
 
-		// TODO: 做并发执行
+		// 发起主数据同步client
+		var ClientFiberUpstream = &http.Client{
+			Transport: &http.Transport{
+				Dial:                UpstreamConn,
+				MaxIdleConns:        10,
+				MaxIdleConnsPerHost: 30,
+				IdleConnTimeout:     20 * time.Second,
+				DisableKeepAlives:   false,
+				TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+			},
+			// 设置超时时间
+			Timeout: time.Second * 60,
+		}
 
+		// 做并发任务分发
 		task := taskUsersQueue.Pop().(*DataApiEmpNode)
 		log.Debug(fmt.Sprintf("[oneauth] task process user: [%s, %s, %s, %s, %s, %d]", task.UserCode, task.UserName, task.OrgId, task.DepId, task.Id, task.Action))
 		// 新建
 		if task.Action&(1<<0) != 0 {
 			log.Debug(fmt.Sprintf("[oneauth] Create user: [%s, %s, %s, %s]", task.UserCode, task.UserName, task.OrgId, task.DepId))
-			id, err := CreateNewUser(task)
+			id, err := CreateNewUser(ClientFiberUpstream, task)
 			if err != nil {
 				continue
 			}
@@ -670,24 +623,70 @@ func ProcessUsersTaskQueue(taskUsersQueue *Queue) {
 		// 更新
 		if task.Action&(1<<1) != 0 {
 			log.Debug(fmt.Sprintf("[oneauth] Update user: [%s, %s, %s, %s]", task.UserCode, task.UserName, task.OrgId, task.DepId))
-			UpdateUserInfo(task)
+			UpdateUserInfo(ClientFiberUpstream, task)
 			task.Action &^= 1 << 1
 		}
 
 		// 移动
 		if task.Action&(1<<2) != 0 {
 			log.Debug(fmt.Sprintf("[oneauth] Move user: [%s, %s, %s, %s]", task.UserCode, task.UserName, task.OrgId, task.DepId))
-			MoveUserByUserId(task)
+			MoveUserByUserId(ClientFiberUpstream, task)
 			task.Action &^= 1 << 2
 		}
 
 		// 删除
 		if task.Action&(1<<3) != 0 {
 			log.Debug(fmt.Sprintf("[oneauth] Delete user: [%s, %s, %s]", task.UserCode, task.UserName, task.Id))
-			DeleteUserByUserId(task)
+			DeleteUserByUserId(ClientFiberUpstream, task)
 			task.Action &^= 1 << 3
 		}
+
 	}
+}
+
+func ProcessUsersTaskQueue(taskUsersQueue *Queue) {
+	if taskUsersQueue.Len() <= 0 {
+		return
+	}
+
+	log.Info("[task] ProcessUsersTaskQueue user task queue size: ", taskUsersQueue.Len())
+
+	// 先创建并发数量的任务队列
+	fiberCount, _ := strconv.Atoi(GlobalConfig.System.Fiber)
+	var FiberQueue = make([]*Queue, fiberCount)
+	for i := 0; i < fiberCount; i++ {
+		FiberQueue[i] = new(Queue)
+	}
+
+	// 任务分摊
+	index := 0
+	for {
+		if taskUsersQueue.Len() <= 0 {
+			break
+		}
+
+		// 做并发任务分发
+		task := taskUsersQueue.Pop().(*DataApiEmpNode)
+		FiberQueue[index].Push(task)
+
+		index++
+		if index >= fiberCount {
+			index = 0
+		}
+	}
+
+	// 任务执行
+	var wg sync.WaitGroup
+	for i := 0; i < fiberCount; i++ {
+		wg.Add(1)
+		go func(index int) {
+			ProcessFiberUserTaskQueue(FiberQueue[index])
+			wg.Done()
+		}(i)
+	}
+
+	// 等待协程都执行完毕
+	wg.Wait()
 }
 
 // 同步数据库内容数据，用于更新到ldap服务

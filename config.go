@@ -11,7 +11,8 @@ type LogInfo struct {
 }
 
 type SystemConfig struct {
-	Log LogInfo `yaml: "log"`
+	Log   LogInfo `yaml: "log"`
+	Fiber string  `yaml: "fiber"`
 }
 
 type DatabaseUser struct {
